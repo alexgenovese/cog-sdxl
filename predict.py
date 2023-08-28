@@ -1,6 +1,6 @@
 import json
 import os
-import re
+import requests
 import shutil
 import subprocess
 import time
@@ -31,6 +31,8 @@ from transformers import CLIPImageProcessor
 
 from dataset_and_utils import TokenEmbeddingsHandler
 
+from lora_diffusion import LoRAManager, monkeypatch_remove_lora
+
 SDXL_MODEL_CACHE = "./sdxl-cache"
 REFINER_MODEL_CACHE = "./refiner-cache"
 SAFETY_CACHE = "./safety-cache"
@@ -41,6 +43,7 @@ REFINER_URL = (
 )
 SAFETY_URL = "https://weights.replicate.delivery/default/sdxl/safety-1.0.tar"
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 class KarrasDPM:
     def from_config(config):
@@ -65,8 +68,32 @@ def download_weights(url, dest):
     subprocess.check_call(["pget", "-x", url, dest])
     print("downloading took: ", time.time() - start)
 
+def url_local_fn(url):
+    return sha512(url.encode()).hexdigest() + ".safetensors"
 
 class Predictor(BasePredictor):
+
+    
+    def download_lora(url):
+        # TODO: allow-list of domains
+
+        fn = url_local_fn(url)
+
+        if not os.path.exists(fn):
+            print("Downloading LoRA model... from", url)
+            # stream chunks of the file to disk
+            with requests.get(url, stream=True) as r:
+                r.raise_for_status()
+                with open(fn, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+
+        else:
+            print("Using disk cache...")
+
+        return fn
+
+
     def load_trained_weights(self, weights, pipe):
         local_weights_cache = "./trained-model"
         if not os.path.exists(local_weights_cache):
@@ -135,7 +162,7 @@ class Predictor(BasePredictor):
                     cross_attention_dim=cross_attention_dim,
                     rank=name_rank_map[name],
                 )
-                unet_lora_attn_procs[name] = module.to("cuda")
+                unet_lora_attn_procs[name] = module.to(device)
 
             unet.set_attn_processor(unet_lora_attn_procs)
             unet.load_state_dict(tensors, strict=False)
@@ -157,13 +184,14 @@ class Predictor(BasePredictor):
         """Load the model into memory to make running multiple predictions efficient"""
         start = time.time()
         self.tuned_model = False
+        self.lora_manager = None
 
         print("Loading safety checker...")
         if not os.path.exists(SAFETY_CACHE):
             download_weights(SAFETY_URL, SAFETY_CACHE)
         self.safety_checker = StableDiffusionSafetyChecker.from_pretrained(
             SAFETY_CACHE, torch_dtype=torch.float16
-        ).to("cuda")
+        ).to(device)
         self.feature_extractor = CLIPImageProcessor.from_pretrained(FEATURE_EXTRACTOR)
 
         if not os.path.exists(SDXL_MODEL_CACHE):
@@ -180,7 +208,7 @@ class Predictor(BasePredictor):
         if weights or os.path.exists("./trained-model"):
             self.load_trained_weights(weights, self.txt2img_pipe)
 
-        self.txt2img_pipe.to("cuda")
+        self.txt2img_pipe.to(device)
 
         print("Loading SDXL img2img pipeline...")
         self.img2img_pipe = StableDiffusionXLImg2ImgPipeline(
@@ -192,7 +220,7 @@ class Predictor(BasePredictor):
             unet=self.txt2img_pipe.unet,
             scheduler=self.txt2img_pipe.scheduler,
         )
-        self.img2img_pipe.to("cuda")
+        self.img2img_pipe.to(device)
 
         print("Loading SDXL inpaint pipeline...")
         self.inpaint_pipe = StableDiffusionXLInpaintPipeline(
@@ -204,7 +232,7 @@ class Predictor(BasePredictor):
             unet=self.txt2img_pipe.unet,
             scheduler=self.txt2img_pipe.scheduler,
         )
-        self.inpaint_pipe.to("cuda")
+        self.inpaint_pipe.to(device)
 
         print("Loading SDXL refiner pipeline...")
         # FIXME(ja): should the vae/text_encoder_2 be loaded from SDXL always?
@@ -224,7 +252,7 @@ class Predictor(BasePredictor):
             use_safetensors=True,
             variant="fp16",
         )
-        self.refiner.to("cuda")
+        self.refiner.to(device)
         print("setup took: ", time.time() - start)
         # self.txt2img_pipe.__class__.encode_prompt = new_encode_prompt
 
@@ -233,15 +261,33 @@ class Predictor(BasePredictor):
         return load_image("/tmp/image.png").convert("RGB")
 
     def run_safety_checker(self, image):
-        safety_checker_input = self.feature_extractor(image, return_tensors="pt").to(
-            "cuda"
-        )
+        safety_checker_input = self.feature_extractor(image, return_tensors="pt").to(device)
         np_image = [np.array(val) for val in image]
         image, has_nsfw_concept = self.safety_checker(
             images=np_image,
             clip_input=safety_checker_input.pixel_values.to(torch.float16),
         )
         return image, has_nsfw_concept
+
+    def set_lora(self, urllists: List[str], scales: List[float]):
+        assert len(urllists) == len(scales), "Number of LoRAs and scales must match."
+
+        merged_fn = url_local_fn(f"{'-'.join(urllists)}")
+
+        if self.loaded == merged_fn:
+            print("The requested LoRAs are loaded.")
+            assert self.lora_manager is not None
+        else:
+
+            st = time.time()
+            self.lora_manager = LoRAManager(
+                [download_lora(url) for url in urllists], self.pipe
+            )
+            self.loaded = merged_fn
+            print(f"merging time: {time.time() - st}")
+
+        self.lora_manager.tune(scales)
+
 
     @torch.inference_mode()
     def predict(
@@ -315,6 +361,10 @@ class Predictor(BasePredictor):
             description="Applies a watermark to enable determining if an image is generated in downstream applications. If you have other provisions for generating or deploying images safely, you can use this to disable watermarking.",
             default=True,
         ),
+        lora_urls: str = Input(
+            description="List of urls for safetensors of lora models, seperated with | .",
+            default="",
+        ),
         lora_scale: float = Input(
             description="LoRA additive scale. Only applicable on trained models.",
             ge=0.0,
@@ -365,7 +415,18 @@ class Predictor(BasePredictor):
             self.refiner.watermark = None
 
         pipe.scheduler = SCHEDULERS[scheduler].from_config(pipe.scheduler.config)
-        generator = torch.Generator("cuda").manual_seed(seed)
+        generator = torch.Generator(device).manual_seed(seed)
+
+        # check if LoRA Urls is supported
+        if len(lora_urls) > 0:
+            lora_urls = [u.strip() for u in lora_urls.split("|")]
+            lora_scales = [float(s.strip()) for s in lora_scales.split("|")]
+            self.set_lora(lora_urls, lora_scales)
+            prompt = self.lora_manager.prompt(prompt)
+        else:
+            print("No LoRA models provided, using default model...")
+            monkeypatch_remove_lora(self.txt2img_pipe.unet)
+            monkeypatch_remove_lora(self.txt2img_pipe.text_encoder)
 
         common_args = {
             "prompt": [prompt] * num_outputs,
