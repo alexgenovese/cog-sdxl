@@ -33,7 +33,6 @@ MODEL_PATH = "./cache"
 TEMP_OUT_DIR = "./temp/"
 TEMP_IN_DIR = "./temp_in/"
 
-
 def preprocess(
     input_images_filetype: str,
     input_zip_path: Path,
@@ -231,7 +230,7 @@ def blip_captioning_dataset(
     text = text.strip()
     print(f"Input captioning text: {text}")
     for image in tqdm(images):
-        inputs = processor(image, return_tensors="pt").to("cuda")
+        inputs = processor(image, return_tensors="pt").to(device)
         out = model.generate(
             **inputs, max_length=150, do_sample=True, top_k=50, temperature=0.7
         )
