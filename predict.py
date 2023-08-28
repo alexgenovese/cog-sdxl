@@ -41,6 +41,7 @@ REFINER_URL = (
 )
 SAFETY_URL = "https://weights.replicate.delivery/default/sdxl/safety-1.0.tar"
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 class KarrasDPM:
     def from_config(config):
@@ -135,7 +136,7 @@ class Predictor(BasePredictor):
                     cross_attention_dim=cross_attention_dim,
                     rank=name_rank_map[name],
                 )
-                unet_lora_attn_procs[name] = module.to("cuda")
+                unet_lora_attn_procs[name] = module.to(device)
 
             unet.set_attn_processor(unet_lora_attn_procs)
             unet.load_state_dict(tensors, strict=False)
@@ -163,7 +164,7 @@ class Predictor(BasePredictor):
             download_weights(SAFETY_URL, SAFETY_CACHE)
         self.safety_checker = StableDiffusionSafetyChecker.from_pretrained(
             SAFETY_CACHE, torch_dtype=torch.float16
-        ).to("cuda")
+        ).to(device)
         self.feature_extractor = CLIPImageProcessor.from_pretrained(FEATURE_EXTRACTOR)
 
         if not os.path.exists(SDXL_MODEL_CACHE):
@@ -180,7 +181,7 @@ class Predictor(BasePredictor):
         if weights or os.path.exists("./trained-model"):
             self.load_trained_weights(weights, self.txt2img_pipe)
 
-        self.txt2img_pipe.to("cuda")
+        self.txt2img_pipe.to(device)
 
         print("Loading SDXL img2img pipeline...")
         self.img2img_pipe = StableDiffusionXLImg2ImgPipeline(
@@ -192,7 +193,7 @@ class Predictor(BasePredictor):
             unet=self.txt2img_pipe.unet,
             scheduler=self.txt2img_pipe.scheduler,
         )
-        self.img2img_pipe.to("cuda")
+        self.img2img_pipe.to(device)
 
         print("Loading SDXL inpaint pipeline...")
         self.inpaint_pipe = StableDiffusionXLInpaintPipeline(
@@ -204,7 +205,7 @@ class Predictor(BasePredictor):
             unet=self.txt2img_pipe.unet,
             scheduler=self.txt2img_pipe.scheduler,
         )
-        self.inpaint_pipe.to("cuda")
+        self.inpaint_pipe.to(device)
 
         print("Loading SDXL refiner pipeline...")
         # FIXME(ja): should the vae/text_encoder_2 be loaded from SDXL always?
@@ -224,7 +225,7 @@ class Predictor(BasePredictor):
             use_safetensors=True,
             variant="fp16",
         )
-        self.refiner.to("cuda")
+        self.refiner.to(device)
         print("setup took: ", time.time() - start)
         # self.txt2img_pipe.__class__.encode_prompt = new_encode_prompt
 
@@ -233,9 +234,7 @@ class Predictor(BasePredictor):
         return load_image("/tmp/image.png").convert("RGB")
 
     def run_safety_checker(self, image):
-        safety_checker_input = self.feature_extractor(image, return_tensors="pt").to(
-            "cuda"
-        )
+        safety_checker_input = self.feature_extractor(image, return_tensors="pt").to(device)
         np_image = [np.array(val) for val in image]
         image, has_nsfw_concept = self.safety_checker(
             images=np_image,
@@ -365,7 +364,7 @@ class Predictor(BasePredictor):
             self.refiner.watermark = None
 
         pipe.scheduler = SCHEDULERS[scheduler].from_config(pipe.scheduler.config)
-        generator = torch.Generator("cuda").manual_seed(seed)
+        generator = torch.Generator(device).manual_seed(seed)
 
         common_args = {
             "prompt": [prompt] * num_outputs,
