@@ -71,10 +71,7 @@ def download_weights(url, dest):
 def url_local_fn(url):
     return sha512(url.encode()).hexdigest() + ".safetensors"
 
-class Predictor(BasePredictor):
-
-    
-    def download_lora(url):
+def download_lora(url):
         # TODO: allow-list of domains
 
         fn = url_local_fn(url)
@@ -93,6 +90,9 @@ class Predictor(BasePredictor):
 
         return fn
 
+
+
+class Predictor(BasePredictor):
 
     def load_trained_weights(self, weights, pipe):
         local_weights_cache = "./trained-model"
