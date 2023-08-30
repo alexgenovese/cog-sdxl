@@ -1,3 +1,4 @@
+from hashlib import sha512
 import json
 import os
 import requests
@@ -365,11 +366,9 @@ class Predictor(BasePredictor):
             description="List of urls for safetensors of lora models, seperated with | .",
             default="",
         ),
-        lora_scale: float = Input(
-            description="LoRA additive scale. Only applicable on trained models.",
-            ge=0.0,
-            le=1.0,
-            default=0.6,
+        lora_scales: str = Input(
+            description="List of scales for safetensors of lora models, seperated with | ",
+            default="0.5",
         ),
     ) -> List[Path]:
         """Run a single prediction on the model"""
@@ -436,8 +435,8 @@ class Predictor(BasePredictor):
             "num_inference_steps": num_inference_steps,
         }
 
-        if self.is_lora:
-            sdxl_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
+        # if self.is_lora:
+        #    sdxl_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
 
         output = pipe(**common_args, **sdxl_kwargs)
 
