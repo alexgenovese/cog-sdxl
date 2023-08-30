@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
+from untar_model import UntarModel
 import numpy as np
 import torch
 from cog import BasePredictor, Input, Path
@@ -26,10 +26,9 @@ from diffusers.pipelines.stable_diffusion.safety_checker import (
     StableDiffusionSafetyChecker,
 )
 from diffusers.utils import load_image
-from safetensors import safe_open
 from safetensors.torch import load_file
 from transformers import CLIPImageProcessor
-
+import tarfile
 from dataset_and_utils import TokenEmbeddingsHandler
 
 from lora_diffusion import LoRAManager, monkeypatch_remove_lora
@@ -120,18 +119,18 @@ class Predictor(BasePredictor):
             new_unet_params = load_file(
                 os.path.join(local_weights_cache, "unet.safetensors")
             )
-            sd = pipe.unet.state_dict()
+            sd = self.pipe.unet.state_dict()
             sd.update(new_unet_params)
-            pipe.unet.load_state_dict(sd)
+            self.pipe.unet.load_state_dict(sd)
 
         else:
             print("Loading Unet LoRA")
 
-            unet = pipe.unet
+            unet = self.pipe.unet
 
             tensors = load_file(os.path.join(local_weights_cache, "lora.safetensors"))
 
-            unet = pipe.unet
+            unet = self.pipe.unet
             unet_lora_attn_procs = {}
             name_rank_map = {}
             for tk, tv in tensors.items():
@@ -170,7 +169,7 @@ class Predictor(BasePredictor):
 
         # load text
         handler = TokenEmbeddingsHandler(
-            [pipe.text_encoder, pipe.text_encoder_2], [pipe.tokenizer, pipe.tokenizer_2]
+            [self.pipe.text_encoder, self.pipe.text_encoder_2], [self.pipe.tokenizer, self.pipe.tokenizer_2]
         )
         handler.load_embeddings(os.path.join(local_weights_cache, "embeddings.pti"))
 
@@ -186,6 +185,9 @@ class Predictor(BasePredictor):
         start = time.time()
         self.tuned_model = False
         self.lora_manager = None
+        self.is_lora = False
+        self.loaded = None
+        self.pipe = None
 
         print("Loading safety checker...")
         if not os.path.exists(SAFETY_CACHE):
@@ -205,7 +207,7 @@ class Predictor(BasePredictor):
             use_safetensors=True,
             variant="fp16",
         )
-        self.is_lora = False
+        
         if weights or os.path.exists("./trained-model"):
             self.load_trained_weights(weights, self.txt2img_pipe)
 
@@ -279,7 +281,6 @@ class Predictor(BasePredictor):
             print("The requested LoRAs are loaded.")
             assert self.lora_manager is not None
         else:
-
             st = time.time()
             self.lora_manager = LoRAManager(
                 [download_lora(url) for url in urllists], self.pipe
@@ -288,6 +289,19 @@ class Predictor(BasePredictor):
             print(f"merging time: {time.time() - st}")
 
         self.lora_manager.tune(scales)
+
+
+    def set_lora_tar_files(self, urllists: List[str]):
+        assert len(urllists) > 0, "Number of LoRAs must be at least 1"
+        # Untar and download the lora models
+        local_folder_all_loras, array_of_loras = UntarModel.get_loras(urllists)
+        UntarModel.remove_directory(local_folder_all_loras)
+        
+        self.lora_manager = LoRAManager(
+            [(url) for url in array_of_loras], self.pipe
+        )
+
+        UntarModel.remove_directory(local_folder_all_loras)
 
 
     @torch.inference_mode()
@@ -389,17 +403,17 @@ class Predictor(BasePredictor):
             sdxl_kwargs["strength"] = prompt_strength
             sdxl_kwargs["width"] = width
             sdxl_kwargs["height"] = height
-            pipe = self.inpaint_pipe
+            self.pipe = self.inpaint_pipe
         elif image:
             print("img2img mode")
             sdxl_kwargs["image"] = self.load_image(image)
             sdxl_kwargs["strength"] = prompt_strength
-            pipe = self.img2img_pipe
+            self.pipe = self.img2img_pipe
         else:
             print("txt2img mode")
             sdxl_kwargs["width"] = width
             sdxl_kwargs["height"] = height
-            pipe = self.txt2img_pipe
+            self.pipe = self.txt2img_pipe
 
         if refine == "expert_ensemble_refiner":
             sdxl_kwargs["output_type"] = "latent"
@@ -409,23 +423,26 @@ class Predictor(BasePredictor):
 
         if not apply_watermark:
             # toggles watermark for this prediction
-            watermark_cache = pipe.watermark
-            pipe.watermark = None
+            watermark_cache = self.pipe.watermark
+            self.pipe.watermark = None
             self.refiner.watermark = None
 
-        pipe.scheduler = SCHEDULERS[scheduler].from_config(pipe.scheduler.config)
+        self.pipe.scheduler = SCHEDULERS[scheduler].from_config(self.pipe.scheduler.config)
         generator = torch.Generator(device).manual_seed(seed)
 
         # check if LoRA Urls is supported
         if len(lora_urls) > 0:
             lora_urls = [u.strip() for u in lora_urls.split("|")]
             lora_scales = [float(s.strip()) for s in lora_scales.split("|")]
-            self.set_lora(lora_urls, lora_scales)
+            # self.set_lora(lora_urls, lora_scales)
+            self.set_lora_tar_files(lora_urls)
             prompt = self.lora_manager.prompt(prompt)
         else:
             print("No LoRA models provided, using default model...")
-            monkeypatch_remove_lora(self.txt2img_pipe.unet)
-            monkeypatch_remove_lora(self.txt2img_pipe.text_encoder)
+            # monkeypatch_remove_lora(self.txt2img_pipe.unet)
+            # monkeypatch_remove_lora(self.txt2img_pipe.text_encoder)
+            monkeypatch_remove_lora(self.pipe.unet)
+            monkeypatch_remove_lora(self.pipe.text_encoder)
 
         common_args = {
             "prompt": [prompt] * num_outputs,
@@ -438,7 +455,7 @@ class Predictor(BasePredictor):
         # if self.is_lora:
         #    sdxl_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
 
-        output = pipe(**common_args, **sdxl_kwargs)
+        output = self.pipe(**common_args, **sdxl_kwargs)
 
         if refine in ["expert_ensemble_refiner", "base_image_refiner"]:
             refiner_kwargs = {
@@ -453,7 +470,7 @@ class Predictor(BasePredictor):
             output = self.refiner(**common_args, **refiner_kwargs)
 
         if not apply_watermark:
-            pipe.watermark = watermark_cache
+            self.pipe.watermark = watermark_cache
             self.refiner.watermark = watermark_cache
 
         _, has_nsfw_content = self.run_safety_checker(output.images)
