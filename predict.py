@@ -366,6 +366,9 @@ class Predictor(BasePredictor):
         pipe.scheduler = SCHEDULERS[scheduler].from_config(pipe.scheduler.config)
         generator = torch.Generator(device).manual_seed(seed)
 
+        # Load Wrong LoRA Weights 
+        pipe.load_lora_weights("minimaxir/sdxl-wrong-lora")
+
         common_args = {
             "prompt": [prompt] * num_outputs,
             "negative_prompt": [negative_prompt] * num_outputs,
