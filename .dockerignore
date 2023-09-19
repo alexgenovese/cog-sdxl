@@ -1,9 +1,1 @@
-./safety-cache/pytorch_model.bin
-./sdxl-cache/text_encoder_2/model.safetensors
-./sdxl-cache/text_encoder/model.safetensors
-./sdxl-cache/unet/diffusion_pytorch_model.safetensors
-./sdxl-cache/vae/diffusion_pytorch_model.safetensors
-./refiner-cache/text_encoder_2/model.safetensors
-./refiner-cache/unet/diffusion_pytorch_model.safetensors
-./refiner-cache/vae/diffusion_pytorch_model.safetensors
 ./.git/objects/pack/pack-64d5a3b3da6d169e942b61379f9b200779655a5b.pack
