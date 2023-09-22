@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
+from compel import Compel, ReturnedEmbeddingsType
 import numpy as np
 import torch
 from cog import BasePredictor, Input, Path
@@ -226,7 +226,6 @@ class Predictor(BasePredictor):
         )
         self.refiner.to("cuda")
         print("setup took: ", time.time() - start)
-        # self.txt2img_pipe.__class__.encode_prompt = new_encode_prompt
 
     def load_image(self, path):
         shutil.copyfile(path, "/tmp/image.png")
@@ -366,7 +365,7 @@ class Predictor(BasePredictor):
 
         pipe.scheduler = SCHEDULERS[scheduler].from_config(pipe.scheduler.config)
         generator = torch.Generator("cuda").manual_seed(seed)
-
+        """""
         common_args = {
             "prompt": [prompt] * num_outputs,
             "negative_prompt": [negative_prompt] * num_outputs,
@@ -374,28 +373,65 @@ class Predictor(BasePredictor):
             "generator": generator,
             "num_inference_steps": num_inference_steps,
         }
+        """
+
+        # Compel for Base Pipeline
+        compel_base = Compel(tokenizer=[pipe.tokenizer, pipe.tokenizer_2] , text_encoder=[pipe.text_encoder, pipe.text_encoder_2], returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED, requires_pooled=[False, True])
+        conditioning, pooled = compel_base(prompt)
+        conditioning_neg, pooled_neg = compel_base(negative_prompt) if negative_prompt is not None else (None, None)
+
+        common_args = {
+            "prompt_embeds": [conditioning] * num_outputs,
+            "pooled_prompt_embeds": [pooled] * num_outputs,
+            "negative_prompt_embeds": [conditioning_neg] * num_outputs,
+            "negative_pooled_prompt_embeds" : [pooled_neg] * num_outputs,
+            "guidance_scale": guidance_scale,
+            "generator": generator,
+            "num_inference_steps": num_inference_steps,
+            "denoising_end":high_noise_frac
+        }
 
         if self.is_lora:
             sdxl_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
 
+        ## START BASE PIPELINE
         output = pipe(**common_args, **sdxl_kwargs)
-
+        
+        # Refiner
         if refine in ["expert_ensemble_refiner", "base_image_refiner"]:
+            # Compel for Refiner Pipeline
+            compel_refiner = Compel(tokenizer=self.refiner.tokenizer_2 , text_encoder=self.refiner.text_encoder_2, returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED, requires_pooled=True)
+            conditioning, pooled = compel_refiner(prompt)
+            conditioning_neg, pooled_neg = compel_refiner(negative_prompt) if negative_prompt is not None else (None, None)
+
             refiner_kwargs = {
                 "image": output.images,
+            }
+
+            refine_args = {
+                "prompt_embeds": [conditioning] * num_outputs,
+                "pooled_prompt_embeds": [pooled] * num_outputs,
+                "negative_prompt_embeds": [conditioning_neg] * num_outputs,
+                "negative_pooled_prompt_embeds" : [pooled_neg] * num_outputs,
+                "guidance_scale": guidance_scale,
+                "generator": generator,
+                "denoising_end": high_noise_frac
             }
 
             if refine == "expert_ensemble_refiner":
                 refiner_kwargs["denoising_start"] = high_noise_frac
             if refine == "base_image_refiner" and refine_steps:
-                common_args["num_inference_steps"] = refine_steps
+                refine_args["num_inference_steps"] = refine_steps
 
-            output = self.refiner(**common_args, **refiner_kwargs)
+            output = self.refiner(**refine_args, **refiner_kwargs)
 
+
+        # Check for Watermark
         if not apply_watermark:
             pipe.watermark = watermark_cache
             self.refiner.watermark = watermark_cache
 
+        # NSFW Check
         _, has_nsfw_content = self.run_safety_checker(output.images)
 
         output_paths = []
@@ -407,9 +443,10 @@ class Predictor(BasePredictor):
             output.images[i].save(output_path)
             output_paths.append(Path(output_path))
 
-        if len(output_paths) == 0:
-            raise Exception(
-                f"NSFW content detected. Try running it again, or try a different prompt."
-            )
+# Remove exception, get the content the same
+#        if len(output_paths) == 0:
+#            raise Exception(
+#                f"NSFW content detected. Try running it again, or try a different prompt."
+#            )
 
         return output_paths
