@@ -30,3 +30,4 @@ build:
     
 predict: "predict.py:Predictor"
 train: "train.py:train"
+image: "r8.im/alexgenovese/test-endpoint"
