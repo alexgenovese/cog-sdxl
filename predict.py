@@ -15,14 +15,10 @@ from diffusers import (
     HeunDiscreteScheduler,
     PNDMScheduler
 )
-from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
-from transformers import CLIPImageProcessor
-# from dataset_and_utils import TokenEmbeddingsHandler
 
-SAFETY_CACHE = "./safety-cache"
-FEATURE_EXTRACTOR = "./feature-extractor"
-SAFETY_URL = "https://weights.replicate.delivery/default/sdxl/safety-1.0.tar"
-
+from lora_diffusion import LoRAManager, monkeypatch_remove_lora
+from hashlib import sha512
+import requests
 
 class KarrasDPM:
     def from_config(config):
@@ -47,32 +43,54 @@ def download_weights(url, dest):
     subprocess.check_call(["pget", "-x", url, dest])
     print("downloading took: ", time.time() - start)
 
+def url_local_fn(url):
+    return sha512(url.encode()).hexdigest() + ".safetensors"
+
+def download_lora(url):
+    # TODO: allow-list of domains
+
+    fn = url_local_fn(url)
+
+    if not os.path.exists(fn):
+        print("Downloading LoRA model... from", url)
+        # stream chunks of the file to disk
+        with requests.get(url, stream=True) as r:
+            r.raise_for_status()
+            with open(fn, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+    else:
+        print("Using disk cache...")
+
+    return fn
+
+def set_lora(self, urllists: List[str], scales: List[float]):
+    assert len(urllists) == len(scales), "Number of LoRAs and scales must match."
+
+    merged_fn = url_local_fn(f"{'-'.join(urllists)}")
+
+    if self.loaded == merged_fn:
+        print("The requested LoRAs are loaded.")
+        assert self.lora_manager is not None
+    else:
+
+        st = time.time()
+        self.lora_manager = LoRAManager(
+            [download_lora(url) for url in urllists], self.pipe
+        )
+        self.loaded = merged_fn
+        print(f"merging time: {time.time() - st}")
+
+    self.lora_manager.tune(scales)
 
 class Predictor(BasePredictor):
     def setup(self):
         """Load the model into memory to make running multiple predictions efficient"""
         start = time.time()
-        print("Loading safety checker...")
-        
-        # SAFETY CHECK LOADER
-        if not os.path.exists(SAFETY_CACHE):
-            download_weights(SAFETY_URL, SAFETY_CACHE)
-        self.safety_checker = StableDiffusionSafetyChecker.from_pretrained(
-            SAFETY_CACHE, torch_dtype=torch.float32
-        ).to("cuda")
-        self.feature_extractor = CLIPImageProcessor.from_pretrained(FEATURE_EXTRACTOR)
+
         print("setup took: ", time.time() - start)
 
-    def run_safety_checker(self, image):
-        safety_checker_input = self.feature_extractor(image, return_tensors="pt").to(
-            "cuda"
-        )
-        np_image = [np.array(val) for val in image]
-        image, has_nsfw_concept = self.safety_checker(
-            images=np_image,
-            clip_input=safety_checker_input.pixel_values.to(torch.float32),
-        )
-        return image, has_nsfw_concept
 
     @torch.inference_mode()
     def predict(
@@ -120,6 +138,14 @@ class Predictor(BasePredictor):
         apply_watermark: bool = Input(
             description="Applies a watermark to enable determining if an image is generated in downstream applications. If you have other provisions for generating or deploying images safely, you can use this to disable watermarking.",
             default=True,
+        ),
+        lora_urls: str = Input(
+            description="List of urls for safetensors of lora models, seperated with | .",
+            default="",
+        ),
+        ora_scales: str = Input(
+            description="List of scales for safetensors of lora models, seperated with | ",
+            default="0.5",
         )
     ) -> List[Path]:
         """Run a single prediction on the model"""
@@ -149,10 +175,19 @@ class Predictor(BasePredictor):
             # toggles watermark for this prediction
             watermark_cache = pipe.watermark
             pipe.watermark = None
-            self.refiner.watermark = None
 
         pipe.scheduler = SCHEDULERS[scheduler].from_config(pipe.scheduler.config)
         generator = torch.Generator("cuda").manual_seed(seed)
+
+        if len(lora_urls) > 0:
+            lora_urls = [u.strip() for u in lora_urls.split("|")]
+            lora_scales = [float(s.strip()) for s in lora_scales.split("|")]
+            self.set_lora(lora_urls, lora_scales)
+            prompt = self.lora_manager.prompt(prompt)
+        else:
+            print("No LoRA models provided, using default model...")
+            monkeypatch_remove_lora(self.pipe.unet)
+            monkeypatch_remove_lora(self.pipe.text_encoder)
 
         common_args = {
             "prompt": [prompt] * num_outputs,
@@ -166,22 +201,11 @@ class Predictor(BasePredictor):
 
         if not apply_watermark:
             pipe.watermark = watermark_cache
-            self.refiner.watermark = watermark_cache
-
-        _, has_nsfw_content = self.run_safety_checker(output.images)
 
         output_paths = []
-        for i, nsfw in enumerate(has_nsfw_content):
-            if nsfw:
-                print(f"NSFW content detected in image {i}")
-                continue
-            output_path = f"/tmp/out-{i}.png"
+        for i, image in enumerate(output.images):
+            output_path = f"/tmp/output-{i}.png"
             output.images[i].save(output_path)
             output_paths.append(Path(output_path))
-
-#        if len(output_paths) == 0:
-#            raise Exception(
-#                f"NSFW content detected. Try running it again, or try a different prompt."
-#            )
 
         return output_paths
