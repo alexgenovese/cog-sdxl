@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
+from compel import Compel, ReturnedEmbeddingsType
 import numpy as np
 import torch
 from cog import BasePredictor, Input, Path
@@ -19,7 +19,10 @@ from diffusers import (
     PNDMScheduler,
     StableDiffusionXLImg2ImgPipeline,
     StableDiffusionXLInpaintPipeline,
+    AutoencoderKL
 )
+
+# /usr/local/lib/python3.10/dist-packages/diffusers/models/attention_processor.py:1570: FutureWarning: `LoRAAttnProcessor2_0` is deprecated and will be removed in version 0.26.0. Make sure use AttnProcessor2_0 instead by settingLoRA layers to `self.{to_q,to_k,to_v,to_out[0]}.lora_layer` respectively. This will be done automatically when using `LoraLoaderMixin.load_lora_weights`
 from diffusers.models.attention_processor import LoRAAttnProcessor2_0
 from diffusers.pipelines.stable_diffusion.safety_checker import (
     StableDiffusionSafetyChecker,
@@ -69,6 +72,7 @@ def download_weights(url, dest):
 
 class Predictor(BasePredictor):
     def load_trained_weights(self, weights, pipe):
+        print("load_trained_weights ", weights)
         local_weights_cache = "./trained-model"
         if not os.path.exists(local_weights_cache):
             # pget -x doesn't like replicate.delivery
@@ -171,11 +175,14 @@ class Predictor(BasePredictor):
             download_weights(SDXL_URL, SDXL_MODEL_CACHE)
 
         print("Loading sdxl txt2img pipeline...")
+        # VAE 
+        better_vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float32)
         self.txt2img_pipe = DiffusionPipeline.from_pretrained(
             SDXL_MODEL_CACHE,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float32, # torch_dtype=torch.float32
             use_safetensors=True,
             variant="fp16",
+            vae=better_vae
         )
         self.is_lora = False
         if weights or os.path.exists("./trained-model"):
@@ -221,13 +228,12 @@ class Predictor(BasePredictor):
             REFINER_MODEL_CACHE,
             text_encoder_2=self.txt2img_pipe.text_encoder_2,
             vae=self.txt2img_pipe.vae,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float32,
             use_safetensors=True,
             variant="fp16",
         )
         self.refiner.to(device)
         print("setup took: ", time.time() - start)
-        # self.txt2img_pipe.__class__.encode_prompt = new_encode_prompt
 
     def load_image(self, path):
         shutil.copyfile(path, "/tmp/image.png")
@@ -331,7 +337,7 @@ class Predictor(BasePredictor):
             # consistency with fine-tuning API
             for k, v in self.token_map.items():
                 prompt = prompt.replace(k, v)
-        print(f"Prompt: {prompt}")
+
         if image and mask:
             print("inpainting mode")
             sdxl_kwargs["image"] = self.load_image(image)
@@ -380,8 +386,15 @@ class Predictor(BasePredictor):
         if self.is_lora:
             sdxl_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
 
-        output = pipe(**common_args, **sdxl_kwargs)
+        # Additional details
+        print(f"IS Lora? {self.is_lora}")
+        pipe.load_lora_weights("minimaxir/sdxl-wrong-lora")
+        pipe.fuse_lora()
 
+        ## START BASE PIPELINE
+        output = pipe(**common_args, **sdxl_kwargs)
+        
+        # Refiner
         if refine in ["expert_ensemble_refiner", "base_image_refiner"]:
             refiner_kwargs = {
                 "image": output.images,
@@ -394,24 +407,25 @@ class Predictor(BasePredictor):
 
             output = self.refiner(**common_args, **refiner_kwargs)
 
+
+        # Check for Watermark
         if not apply_watermark:
             pipe.watermark = watermark_cache
             self.refiner.watermark = watermark_cache
 
+        # NSFW Check
         _, has_nsfw_content = self.run_safety_checker(output.images)
 
         output_paths = []
         for i, nsfw in enumerate(has_nsfw_content):
-            if nsfw:
-                print(f"NSFW content detected in image {i}")
-                continue
             output_path = f"/tmp/out-{i}.png"
             output.images[i].save(output_path)
             output_paths.append(Path(output_path))
 
-        if len(output_paths) == 0:
-            raise Exception(
-                f"NSFW content detected. Try running it again, or try a different prompt."
-            )
+# Remove exception, get the content the same
+#        if len(output_paths) == 0:
+#            raise Exception(
+#                f"NSFW content detected. Try running it again, or try a different prompt."
+#            )
 
         return output_paths

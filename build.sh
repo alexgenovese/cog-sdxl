@@ -13,7 +13,7 @@ BASE_IMAGE="r8.im/alexgenovese/sdxl"
 
 # BASE_ID=$(docker inspect $(BASE_IMAGE) --format='{{index .Id}}')
 
-echo "ignore all the big files, copy copy files"
+echo "ignore all the big files, copy small files only"
 find . -type f -size +10M > .dockerignore
 docker build --build-arg BASE_IMAGE=$BASE_IMAGE -t final .
 FINAL_ID=$(docker inspect final:latest --format='{{index .Id}}')
