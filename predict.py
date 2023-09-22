@@ -19,7 +19,10 @@ from diffusers import (
     PNDMScheduler,
     StableDiffusionXLImg2ImgPipeline,
     StableDiffusionXLInpaintPipeline,
+    AutoencoderKL
 )
+
+# /usr/local/lib/python3.10/dist-packages/diffusers/models/attention_processor.py:1570: FutureWarning: `LoRAAttnProcessor2_0` is deprecated and will be removed in version 0.26.0. Make sure use AttnProcessor2_0 instead by settingLoRA layers to `self.{to_q,to_k,to_v,to_out[0]}.lora_layer` respectively. This will be done automatically when using `LoraLoaderMixin.load_lora_weights`
 from diffusers.models.attention_processor import LoRAAttnProcessor2_0
 from diffusers.pipelines.stable_diffusion.safety_checker import (
     StableDiffusionSafetyChecker,
@@ -68,6 +71,7 @@ def download_weights(url, dest):
 
 class Predictor(BasePredictor):
     def load_trained_weights(self, weights, pipe):
+        print("load_trained_weights ", weights)
         local_weights_cache = "./trained-model"
         if not os.path.exists(local_weights_cache):
             # pget -x doesn't like replicate.delivery
@@ -170,11 +174,14 @@ class Predictor(BasePredictor):
             download_weights(SDXL_URL, SDXL_MODEL_CACHE)
 
         print("Loading sdxl txt2img pipeline...")
+        # VAE 
+        better_vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float32)
         self.txt2img_pipe = DiffusionPipeline.from_pretrained(
             SDXL_MODEL_CACHE,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float32, # torch_dtype=torch.float32
             use_safetensors=True,
             variant="fp16",
+            vae=better_vae
         )
         self.is_lora = False
         if weights or os.path.exists("./trained-model"):
@@ -220,7 +227,7 @@ class Predictor(BasePredictor):
             REFINER_MODEL_CACHE,
             text_encoder_2=self.txt2img_pipe.text_encoder_2,
             vae=self.txt2img_pipe.vae,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float32,
             use_safetensors=True,
             variant="fp16",
         )
@@ -331,7 +338,7 @@ class Predictor(BasePredictor):
             # consistency with fine-tuning API
             for k, v in self.token_map.items():
                 prompt = prompt.replace(k, v)
-        print(f"Prompt: {prompt}")
+
         if image and mask:
             print("inpainting mode")
             sdxl_kwargs["image"] = self.load_image(image)
@@ -365,7 +372,7 @@ class Predictor(BasePredictor):
 
         pipe.scheduler = SCHEDULERS[scheduler].from_config(pipe.scheduler.config)
         generator = torch.Generator("cuda").manual_seed(seed)
-        """""
+
         common_args = {
             "prompt": [prompt] * num_outputs,
             "negative_prompt": [negative_prompt] * num_outputs,
@@ -373,57 +380,30 @@ class Predictor(BasePredictor):
             "generator": generator,
             "num_inference_steps": num_inference_steps,
         }
-        """
-
-        # Compel for Base Pipeline
-        compel_base = Compel(tokenizer=[pipe.tokenizer, pipe.tokenizer_2] , text_encoder=[pipe.text_encoder, pipe.text_encoder_2], returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED, requires_pooled=[False, True])
-        conditioning, pooled = compel_base(prompt)
-        conditioning_neg, pooled_neg = compel_base(negative_prompt) if negative_prompt is not None else (None, None)
-
-        common_args = {
-            "prompt_embeds": [conditioning] * num_outputs,
-            "pooled_prompt_embeds": [pooled] * num_outputs,
-            "negative_prompt_embeds": [conditioning_neg] * num_outputs,
-            "negative_pooled_prompt_embeds" : [pooled_neg] * num_outputs,
-            "guidance_scale": guidance_scale,
-            "generator": generator,
-            "num_inference_steps": num_inference_steps,
-            "denoising_end":high_noise_frac
-        }
 
         if self.is_lora:
             sdxl_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
+
+        # Additional details
+        print(f"IS Lora? {self.is_lora}")
+        pipe.load_lora_weights("minimaxir/sdxl-wrong-lora")
+        pipe.fuse_lora()
 
         ## START BASE PIPELINE
         output = pipe(**common_args, **sdxl_kwargs)
         
         # Refiner
         if refine in ["expert_ensemble_refiner", "base_image_refiner"]:
-            # Compel for Refiner Pipeline
-            compel_refiner = Compel(tokenizer=self.refiner.tokenizer_2 , text_encoder=self.refiner.text_encoder_2, returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED, requires_pooled=True)
-            conditioning, pooled = compel_refiner(prompt)
-            conditioning_neg, pooled_neg = compel_refiner(negative_prompt) if negative_prompt is not None else (None, None)
-
             refiner_kwargs = {
                 "image": output.images,
-            }
-
-            refine_args = {
-                "prompt_embeds": [conditioning] * num_outputs,
-                "pooled_prompt_embeds": [pooled] * num_outputs,
-                "negative_prompt_embeds": [conditioning_neg] * num_outputs,
-                "negative_pooled_prompt_embeds" : [pooled_neg] * num_outputs,
-                "guidance_scale": guidance_scale,
-                "generator": generator,
-                "denoising_end": high_noise_frac
             }
 
             if refine == "expert_ensemble_refiner":
                 refiner_kwargs["denoising_start"] = high_noise_frac
             if refine == "base_image_refiner" and refine_steps:
-                refine_args["num_inference_steps"] = refine_steps
+                common_args["num_inference_steps"] = refine_steps
 
-            output = self.refiner(**refine_args, **refiner_kwargs)
+            output = self.refiner(**common_args, **refiner_kwargs)
 
 
         # Check for Watermark
@@ -436,9 +416,6 @@ class Predictor(BasePredictor):
 
         output_paths = []
         for i, nsfw in enumerate(has_nsfw_content):
-            if nsfw:
-                print(f"NSFW content detected in image {i}")
-                continue
             output_path = f"/tmp/out-{i}.png"
             output.images[i].save(output_path)
             output_paths.append(Path(output_path))
