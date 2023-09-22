@@ -58,7 +58,7 @@ class Predictor(BasePredictor):
         if not os.path.exists(SAFETY_CACHE):
             download_weights(SAFETY_URL, SAFETY_CACHE)
         self.safety_checker = StableDiffusionSafetyChecker.from_pretrained(
-            SAFETY_CACHE, torch_dtype=torch.float16
+            SAFETY_CACHE, torch_dtype=torch.float32
         ).to("cuda")
         self.feature_extractor = CLIPImageProcessor.from_pretrained(FEATURE_EXTRACTOR)
         print("setup took: ", time.time() - start)
@@ -70,7 +70,7 @@ class Predictor(BasePredictor):
         np_image = [np.array(val) for val in image]
         image, has_nsfw_concept = self.safety_checker(
             images=np_image,
-            clip_input=safety_checker_input.pixel_values.to(torch.float16),
+            clip_input=safety_checker_input.pixel_values.to(torch.float32),
         )
         return image, has_nsfw_concept
 
@@ -139,7 +139,7 @@ class Predictor(BasePredictor):
         print("Loading sdxl pipeline...")
         pipe = DiffusionPipeline.from_pretrained(
             base_model,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
             use_safetensors=True,
             variant="fp16",
         )
