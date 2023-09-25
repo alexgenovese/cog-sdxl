@@ -35,14 +35,6 @@ SCHEDULERS = {
     "PNDM": PNDMScheduler,
 }
 
-
-def download_weights(url, dest):
-    start = time.time()
-    print("downloading url: ", url)
-    print("downloading to: ", dest)
-    subprocess.check_call(["pget", "-x", url, dest])
-    print("downloading took: ", time.time() - start)
-
 def url_local_fn(url):
     return sha512(url.encode()).hexdigest() + ".safetensors"
 
@@ -63,32 +55,40 @@ def download_lora(url):
     print(f"------- End download lora {url}")
     return fn
 
-def set_lora(self, urllists: List[str], scales: List[float]):
-    assert len(urllists) == len(scales), "Number of LoRAs and scales must match."
-
-    merged_fn = url_local_fn(f"{'-'.join(urllists)}")
-
-    if self.loaded == merged_fn:
-        print("The requested LoRAs are loaded.")
-        assert self.lora_manager is not None
-    else:
-
-        st = time.time()
-        self.lora_manager = LoRAManager(
-            [download_lora(url) for url in urllists], self.pipe
-        )
-        self.loaded = merged_fn
-        print(f"merging time: {time.time() - st}")
-
-    self.lora_manager.tune(scales)
 
 class Predictor(BasePredictor):
     def setup(self):
         """Load the model into memory to make running multiple predictions efficient"""
         start = time.time()
 
+        self.pipe = None
+        self.token_size_list: list = []
+        self.ranklist: list = []
+        self.loaded = None
+        self.lora_manager = None
+
         print("setup took: ", time.time() - start)
 
+    def set_lora(self, urllists: List[str], scales: List[float]):
+        assert len(urllists) == len(scales), "Number of LoRAs and scales must match."
+
+        print(f"Set_Lora {urllists} and {scales} – {self.pipe}")
+
+        merged_fn = url_local_fn(f"{'-'.join(urllists)}")
+
+        if self.loaded == merged_fn:
+            print("The requested LoRAs are loaded.")
+            assert self.lora_manager is not None
+        else:
+
+            st = time.time()
+            self.lora_manager = LoRAManager(
+                [download_lora(url) for url in urllists], self.pipe
+            )
+            self.loaded = merged_fn
+            print(f"merging time: {time.time() - st}")
+
+        self.lora_manager.tune(scales)
 
     @torch.inference_mode()
     def predict(
@@ -141,7 +141,7 @@ class Predictor(BasePredictor):
             description="List of urls for safetensors of lora models, seperated with | .",
             default="",
         ),
-        ora_scales: str = Input(
+        lora_scales: str = Input(
             description="List of scales for safetensors of lora models, seperated with | ",
             default="0.5",
         )
@@ -161,20 +161,20 @@ class Predictor(BasePredictor):
         sdxl_kwargs["height"] = height
 
         print("Loading sdxl pipeline...")
-        pipe = DiffusionPipeline.from_pretrained(
+        self.pipe = DiffusionPipeline.from_pretrained(
             base_model,
             torch_dtype=torch.bfloat16,
             use_safetensors=True,
             variant="fp16",
         )
-        pipe.to("cuda")
+        self.pipe.to("cuda")
 
         if not apply_watermark:
             # toggles watermark for this prediction
-            watermark_cache = pipe.watermark
-            pipe.watermark = None
+            watermark_cache = self.pipe.watermark
+            self.pipe.watermark = None
 
-        pipe.scheduler = SCHEDULERS[scheduler].from_config(pipe.scheduler.config)
+        self.pipe.scheduler = SCHEDULERS[scheduler].from_config(self.pipe.scheduler.config)
         generator = torch.Generator("cuda").manual_seed(seed)
 
         if len(lora_urls) > 0:
@@ -195,10 +195,10 @@ class Predictor(BasePredictor):
             "num_inference_steps": num_inference_steps,
         }
 
-        output = pipe(**common_args, **sdxl_kwargs)
+        output = self.pipe(**common_args, **sdxl_kwargs)
 
         if not apply_watermark:
-            pipe.watermark = watermark_cache
+            self.pipe.watermark = watermark_cache
 
         output_paths = []
         for i, image in enumerate(output.images):
