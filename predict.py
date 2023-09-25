@@ -47,22 +47,20 @@ def url_local_fn(url):
     return sha512(url.encode()).hexdigest() + ".safetensors"
 
 def download_lora(url):
-    # TODO: allow-list of domains
-
     fn = url_local_fn(url)
 
     if not os.path.exists(fn):
-        print("Downloading LoRA model... from", url)
+        print(f"Starting download lora from url {url}")
         # stream chunks of the file to disk
         with requests.get(url, stream=True) as r:
             r.raise_for_status()
             with open(fn, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
-
     else:
         print("Using disk cache...")
 
+    print(f"------- End download lora {url}")
     return fn
 
 def set_lora(self, urllists: List[str], scales: List[float]):
