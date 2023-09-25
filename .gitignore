@@ -1,4 +1,6 @@
 .gitignore
+.dockerignore
+STATUS.md
 example_datasets
 refiner-cache
 sdxl-cache
