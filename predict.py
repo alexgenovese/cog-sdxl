@@ -1,6 +1,6 @@
 import json
 import os
-import re
+import hashlib
 import shutil
 import subprocess
 import time
@@ -21,6 +21,7 @@ from diffusers import (
     StableDiffusionXLInpaintPipeline,
     AutoencoderKL
 )
+from weights import WeightsDownloadCache
 
 # /usr/local/lib/python3.10/dist-packages/diffusers/models/attention_processor.py:1570: FutureWarning: `LoRAAttnProcessor2_0` is deprecated and will be removed in version 0.26.0. Make sure use AttnProcessor2_0 instead by settingLoRA layers to `self.{to_q,to_k,to_v,to_out[0]}.lora_layer` respectively. This will be done automatically when using `LoraLoaderMixin.load_lora_weights`
 from diffusers.models.attention_processor import LoRAAttnProcessor2_0
@@ -72,15 +73,13 @@ def download_weights(url, dest):
 
 class Predictor(BasePredictor):
     def load_trained_weights(self, weights, pipe):
-        print("load_trained_weights ", weights)
-        local_weights_cache = "./trained-model"
-        if not os.path.exists(local_weights_cache):
-            # pget -x doesn't like replicate.delivery
-            weights = str(weights)
-            weights = weights.replace(
-                "replicate.delivery/pbxt", "storage.googleapis.com/replicate-files"
-            )
-            download_weights(weights, local_weights_cache)
+        if self.tuned_weights == weights:
+            print("skipping loading .. weights already loaded")
+            return
+
+        self.tuned_weights = weights
+
+        local_weights_cache = self.weights_cache.ensure(weights)
 
         # load UNET
         print("Loading fine-tuned model")
@@ -140,7 +139,7 @@ class Predictor(BasePredictor):
                     cross_attention_dim=cross_attention_dim,
                     rank=name_rank_map[name],
                 )
-                unet_lora_attn_procs[name] = module.to(device)
+                unet_lora_attn_procs[name] = module.to("cuda")
 
             unet.set_attn_processor(unet_lora_attn_procs)
             unet.load_state_dict(tensors, strict=False)
@@ -160,14 +159,18 @@ class Predictor(BasePredictor):
 
     def setup(self, weights: Optional[Path] = None):
         """Load the model into memory to make running multiple predictions efficient"""
+
         start = time.time()
         self.tuned_model = False
+        self.tuned_weights = None
+
+        self.weights_cache = WeightsDownloadCache()
 
         print("Loading safety checker...")
         if not os.path.exists(SAFETY_CACHE):
             download_weights(SAFETY_URL, SAFETY_CACHE)
         self.safety_checker = StableDiffusionSafetyChecker.from_pretrained(
-            SAFETY_CACHE, torch_dtype=torch.float16
+            SAFETY_CACHE, torch_dtype=torch.float32
         ).to(device)
         self.feature_extractor = CLIPImageProcessor.from_pretrained(FEATURE_EXTRACTOR)
 
@@ -246,7 +249,7 @@ class Predictor(BasePredictor):
         np_image = [np.array(val) for val in image]
         image, has_nsfw_concept = self.safety_checker(
             images=np_image,
-            clip_input=safety_checker_input.pixel_values.to(torch.float16),
+            clip_input=safety_checker_input.pixel_values.to(torch.float32),
         )
         return image, has_nsfw_concept
 
