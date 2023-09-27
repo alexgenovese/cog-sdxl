@@ -176,13 +176,14 @@ class Predictor(BasePredictor):
 
         print("Loading sdxl txt2img pipeline...")
         # VAE 
-        better_vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float32)
+        better_vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.bfloat16)
         self.txt2img_pipe = DiffusionPipeline.from_pretrained(
             SDXL_MODEL_CACHE,
-            torch_dtype=torch.float32, # torch_dtype=torch.float32
+            torch_dtype=torch.bfloat16, # torch_dtype=torch.float32
             use_safetensors=True,
-            variant="fp16",
-            vae=better_vae
+            variant="fp32",
+            vae=better_vae,
+            add_watermark=False
         )
         self.is_lora = False
         if weights or os.path.exists("./trained-model"):
@@ -228,9 +229,10 @@ class Predictor(BasePredictor):
             REFINER_MODEL_CACHE,
             text_encoder_2=self.txt2img_pipe.text_encoder_2,
             vae=self.txt2img_pipe.vae,
-            torch_dtype=torch.float32,
+            torch_dtype=torch.bfloat16,
             use_safetensors=True,
-            variant="fp16",
+            variant="fp32",
+            add_watermark=False
         )
         self.refiner.to(device)
         print("setup took: ", time.time() - start)
@@ -324,7 +326,7 @@ class Predictor(BasePredictor):
             description="LoRA additive scale. Only applicable on trained models.",
             ge=0.0,
             le=1.0,
-            default=0.6,
+            default=0.8,
         ),
     ) -> List[Path]:
         """Run a single prediction on the model"""
@@ -372,9 +374,6 @@ class Predictor(BasePredictor):
         pipe.scheduler = SCHEDULERS[scheduler].from_config(pipe.scheduler.config)
         generator = torch.Generator(device).manual_seed(seed)
 
-        # Load Wrong LoRA Weights 
-        pipe.load_lora_weights("minimaxir/sdxl-wrong-lora")
-
         common_args = {
             "prompt": [prompt] * num_outputs,
             "negative_prompt": [negative_prompt] * num_outputs,
@@ -387,7 +386,6 @@ class Predictor(BasePredictor):
             sdxl_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
 
         # Additional details
-        print(f"IS Lora? {self.is_lora}")
         pipe.load_lora_weights("minimaxir/sdxl-wrong-lora")
         pipe.fuse_lora()
 
