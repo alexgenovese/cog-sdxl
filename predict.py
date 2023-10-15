@@ -1,3 +1,4 @@
+from PIL import Image
 import json
 import os
 import hashlib
@@ -62,6 +63,17 @@ SCHEDULERS = {
     "PNDM": PNDMScheduler,
 }
 
+# Remove image metadata
+def clear_exif(path_to_image, path_to_output):
+    with Image.open(path_to_image, mode='r', formats=['PNG']) as im:
+        fields_to_keep = ('transparency', )
+        exif_fields = list(im.info.keys())
+        for k in exif_fields:
+            if k not in fields_to_keep:
+                del im.info[k]
+
+        im.save(path_to_output, format='PNG')
+        return path_to_output
 
 def download_weights(url, dest):
     start = time.time()
@@ -421,7 +433,8 @@ class Predictor(BasePredictor):
         for i, nsfw in enumerate(has_nsfw_content):
             output_path = f"/tmp/out-{i}.png"
             output.images[i].save(output_path)
-            output_paths.append(Path(output_path))
+            new_output_path = clear_exif(output_path, f"/tmp/out-{i}-cleared.png")
+            output_paths.append(Path( new_output_path ))
 
 # Remove exception, get the content the same
 #        if len(output_paths) == 0:
