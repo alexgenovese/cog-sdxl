@@ -94,8 +94,8 @@ class Predictor(BasePredictor):
     def predict(
         self,
         base_model: str = Input(
-            description="base_model HF sintax",
-            default="SG161222/RealVisXL_V1.0",
+            description="base_model HF syntax",
+            default="username/repo_id",
         ),
         prompt: str = Input(
             description="Input prompt",
