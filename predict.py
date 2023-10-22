@@ -1,12 +1,13 @@
 from PIL import Image
 import json
 import os
-import hashlib
+import re
 import shutil
 import subprocess
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from compel import Compel, ReturnedEmbeddingsType
+from weights import WeightsDownloadCache
 import numpy as np
 import torch
 from cog import BasePredictor, Input, Path
@@ -40,7 +41,7 @@ SDXL_MODEL_CACHE = "./sdxl-cache"
 REFINER_MODEL_CACHE = "./refiner-cache"
 SAFETY_CACHE = "./safety-cache"
 FEATURE_EXTRACTOR = "./feature-extractor"
-SDXL_URL = "https://weights.replicate.delivery/default/sdxl/sdxl-vae-fix-1.0.tar"
+SDXL_URL = "https://weights.replicate.delivery/default/sdxl/sdxl-vae-upcast-fix.tar"
 REFINER_URL = (
     "https://weights.replicate.delivery/default/sdxl/refiner-no-vae-no-encoder-1.0.tar"
 )
@@ -79,12 +80,16 @@ def download_weights(url, dest):
     start = time.time()
     print("downloading url: ", url)
     print("downloading to: ", dest)
-    subprocess.check_call(["pget", "-x", url, dest])
+    subprocess.check_call(["pget", "-x", url, dest], close_fds=False)
     print("downloading took: ", time.time() - start)
 
 
 class Predictor(BasePredictor):
     def load_trained_weights(self, weights, pipe):
+        from no_init import no_init_or_tensor
+
+        # weights can be a URLPath, which behaves in unexpected ways
+        weights = str(weights)
         if self.tuned_weights == weights:
             print("skipping loading .. weights already loaded")
             return
@@ -108,9 +113,8 @@ class Predictor(BasePredictor):
             new_unet_params = load_file(
                 os.path.join(local_weights_cache, "unet.safetensors")
             )
-            sd = pipe.unet.state_dict()
-            sd.update(new_unet_params)
-            pipe.unet.load_state_dict(sd)
+            # this should return _IncompatibleKeys(missing_keys=[...], unexpected_keys=[])
+            pipe.unet.load_state_dict(new_unet_params, strict=False)
 
         else:
             print("Loading Unet LoRA")
@@ -119,7 +123,6 @@ class Predictor(BasePredictor):
 
             tensors = load_file(os.path.join(local_weights_cache, "lora.safetensors"))
 
-            unet = pipe.unet
             unet_lora_attn_procs = {}
             name_rank_map = {}
             for tk, tv in tensors.items():
@@ -145,13 +148,13 @@ class Predictor(BasePredictor):
                 elif name.startswith("down_blocks"):
                     block_id = int(name[len("down_blocks.")])
                     hidden_size = unet.config.block_out_channels[block_id]
-
-                module = LoRAAttnProcessor2_0(
-                    hidden_size=hidden_size,
-                    cross_attention_dim=cross_attention_dim,
-                    rank=name_rank_map[name],
-                )
-                unet_lora_attn_procs[name] = module.to("cuda")
+                with no_init_or_tensor():
+                    module = LoRAAttnProcessor2_0(
+                        hidden_size=hidden_size,
+                        cross_attention_dim=cross_attention_dim,
+                        rank=name_rank_map[name],
+                    )
+                unet_lora_attn_procs[name] = module.to("cuda", non_blocking=True)
 
             unet.set_attn_processor(unet_lora_attn_procs)
             unet.load_state_dict(tensors, strict=False)
@@ -172,9 +175,12 @@ class Predictor(BasePredictor):
     def setup(self, weights: Optional[Path] = None):
         """Load the model into memory to make running multiple predictions efficient"""
 
+
         start = time.time()
         self.tuned_model = False
         self.tuned_weights = None
+        if str(weights) == "weights":
+            weights = None
 
         self.weights_cache = WeightsDownloadCache()
 
@@ -341,13 +347,28 @@ class Predictor(BasePredictor):
             description="LoRA additive scale. Only applicable on trained models.",
             ge=0.0,
             le=1.0,
-            default=0.8,
+            default=0.6,
+        ),
+        replicate_weights: str = Input(
+            description="Replicate LoRA weights to use. Leave blank to use the default weights.",
+            default=None,
+        ),
+        replicate_weights: str = Input(
+            description="Replicate LoRA weights to use. Leave blank to use the default weights.",
+            default=None,
         ),
     ) -> List[Path]:
         """Run a single prediction on the model"""
         if seed is None:
             seed = int.from_bytes(os.urandom(2), "big")
         print(f"Using seed: {seed}")
+
+        if replicate_weights:
+            self.load_trained_weights(replicate_weights, self.txt2img_pipe)
+        
+        # OOMs can leave vae in bad state
+        if self.txt2img_pipe.vae.dtype == torch.float32:
+            self.txt2img_pipe.vae.to(dtype=torch.float16)
 
         sdxl_kwargs = {}
         if self.tuned_model:
