@@ -352,11 +352,7 @@ class Predictor(BasePredictor):
         replicate_weights: str = Input(
             description="Replicate LoRA weights to use. Leave blank to use the default weights.",
             default=None,
-        ),
-        replicate_weights: str = Input(
-            description="Replicate LoRA weights to use. Leave blank to use the default weights.",
-            default=None,
-        ),
+        )
     ) -> List[Path]:
         """Run a single prediction on the model"""
         if seed is None:
