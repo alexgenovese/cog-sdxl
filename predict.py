@@ -23,7 +23,6 @@ from diffusers import (
     StableDiffusionXLInpaintPipeline,
     AutoencoderKL
 )
-from weights import WeightsDownloadCache
 
 # /usr/local/lib/python3.10/dist-packages/diffusers/models/attention_processor.py:1570: FutureWarning: `LoRAAttnProcessor2_0` is deprecated and will be removed in version 0.26.0. Make sure use AttnProcessor2_0 instead by settingLoRA layers to `self.{to_q,to_k,to_v,to_out[0]}.lora_layer` respectively. This will be done automatically when using `LoraLoaderMixin.load_lora_weights`
 from diffusers.models.attention_processor import LoRAAttnProcessor2_0
