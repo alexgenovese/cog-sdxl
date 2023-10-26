@@ -36,6 +36,8 @@ from transformers import CLIPImageProcessor
 
 from dataset_and_utils import TokenEmbeddingsHandler
 
+from .freeu import register_free_upblock2d, register_free_crossattn_upblock2d
+
 SDXL_MODEL_CACHE = "./sdxl-cache"
 REFINER_MODEL_CACHE = "./refiner-cache"
 SAFETY_CACHE = "./safety-cache"
@@ -308,6 +310,11 @@ class Predictor(BasePredictor):
             choices=SCHEDULERS.keys(),
             default="K_EULER",
         ),
+        freeu: str = Input(
+            description="free u for SDXL",
+            choices=["yes", "no"],
+            default="yes",
+        ),
         num_inference_steps: int = Input(
             description="Number of denoising steps", ge=1, le=500, default=50
         ),
@@ -419,6 +426,11 @@ class Predictor(BasePredictor):
         # Additional details
         pipe.load_lora_weights("minimaxir/sdxl-wrong-lora")
         pipe.fuse_lora()
+
+        # Free U
+        if freeu == 'yes':
+            register_free_upblock2d(pipe, b1=1.3, b2=1.4, s1=0.9, s2=0.2)
+            register_free_crossattn_upblock2d(pipe, b1=1.3, b2=1.4, s1=0.9, s2=0.2)
 
         ## START BASE PIPELINE
         output = pipe(**common_args, **sdxl_kwargs)
