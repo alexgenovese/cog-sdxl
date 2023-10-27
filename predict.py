@@ -36,8 +36,6 @@ from transformers import CLIPImageProcessor
 
 from dataset_and_utils import TokenEmbeddingsHandler
 
-from freeu import register_free_upblock2d, register_free_crossattn_upblock2d
-
 SDXL_MODEL_CACHE = "./sdxl-cache"
 REFINER_MODEL_CACHE = "./refiner-cache"
 SAFETY_CACHE = "./safety-cache"
@@ -423,14 +421,17 @@ class Predictor(BasePredictor):
         if self.is_lora:
             sdxl_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
 
+
         # Additional details
+        # https://towardsdatascience.com/hugging-face-diffusers-can-correctly-load-lora-now-a332501342a3
         pipe.load_lora_weights("minimaxir/sdxl-wrong-lora")
         pipe.fuse_lora()
 
         # Free U
         if freeu == 'yes':
-            register_free_upblock2d(pipe, b1=1.3, b2=1.4, s1=0.9, s2=0.2)
-            register_free_crossattn_upblock2d(pipe, b1=1.3, b2=1.4, s1=0.9, s2=0.2)
+            pipe.enable_freeu(s1=0.6, s2=0.4, b1=1.1, b2=1.2)
+            # register_free_upblock2d(pipe, b1=1.3, b2=1.4, s1=0.9, s2=0.2)
+            # register_free_crossattn_upblock2d(pipe, b1=1.3, b2=1.4, s1=0.9, s2=0.2)
 
         ## START BASE PIPELINE
         output = pipe(**common_args, **sdxl_kwargs)
