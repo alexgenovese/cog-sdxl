@@ -36,7 +36,7 @@ from transformers import CLIPImageProcessor
 
 from dataset_and_utils import TokenEmbeddingsHandler
 
-from .freeu import register_free_upblock2d, register_free_crossattn_upblock2d
+from freeu import register_free_upblock2d, register_free_crossattn_upblock2d
 
 SDXL_MODEL_CACHE = "./sdxl-cache"
 REFINER_MODEL_CACHE = "./refiner-cache"
